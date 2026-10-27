@@ -1751,12 +1751,18 @@ function drawGameOver() {
   drawOverlayBase('rgba(30,0,0,0.62)');
   const win = game.win;
   drawPanel(W / 2 - 290, 150, 580, 400, win ? '#7a5323' : '#6b2a22');
-  text(win ? '草坪守住了！' : '伤心李依然吃掉了你的脑子！',
-    W / 2, 226, win ? 40 : 34, win ? '#6db52f' : '#c0392b', 'center', true, win ? '#2f5a17' : '#4a0f0a');
-  text(win ? '12 波全部击退，你是真正的园艺大师' : '它大摇大摆地走进了李依然之家……',
-    W / 2, 276, 16, '#7a6a4a');
-  text('坚持波数：' + game.wave + ' / ' + WAVES, W / 2, 330, 20, '#5a3a16');
-  text('击杀数量：' + game.zombiesKilled, W / 2, 364, 20, '#5a3a16');
+  if (win) {
+    text('恭喜你通关！', W / 2, 226, 40, '#6db52f', 'center', true, '#2f5a17');
+    text('获得奖品一个', W / 2, 274, 18, '#7a6a4a');
+    text('请对 sharkmiao 说', W / 2, 312, 16, '#5a3a16');
+    text('“嘎达嘎达”', W / 2, 356, 34, '#c0392b', 'center', true, '#7a1f14');
+    text('击杀数量：' + game.zombiesKilled, W / 2, 406, 18, '#5a3a16');
+  } else {
+    text('伤心李依然吃掉了你的脑子！', W / 2, 226, 34, '#c0392b', 'center', true, '#4a0f0a');
+    text('它大摇大摆地走进了李依然之家……', W / 2, 276, 16, '#7a6a4a');
+    text('坚持波数：' + game.wave + ' / ' + WAVES, W / 2, 330, 20, '#5a3a16');
+    text('击杀数量：' + game.zombiesKilled, W / 2, 364, 20, '#5a3a16');
+  }
   drawButton(RESTART_BTN, win ? '再玩一局' : '再来一局');
   text('点击按钮重新开始', W / 2, 526, 13, '#96836a');
 }
