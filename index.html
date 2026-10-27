@@ -10,15 +10,14 @@
   body{display:flex;align-items:center;justify-content:center;font-family:"Microsoft YaHei","PingFang SC",sans-serif}
   #wrap{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;overflow:hidden;display:flex;align-items:center;justify-content:center}
   canvas{width:100%;height:100%;display:block;cursor:pointer;touch-action:none;background:#79b64f}
-  #rotate{position:fixed;inset:0;z-index:99;display:none;flex-direction:column;align-items:center;justify-content:center;gap:20px;background:radial-gradient(circle at 50% 40%,#1d3315,#0a1207);color:#ffe066;font-size:20px;letter-spacing:2px}
-  #rotate .phone{width:66px;height:118px;border:5px solid #ffe066;border-radius:14px;box-shadow:0 0 22px rgba(255,224,102,.45);animation:rot 1.8s ease-in-out infinite}
-  #rotate small{color:#9fb884;font-size:13px;letter-spacing:1px}
-  @keyframes rot{0%,35%{transform:rotate(0)}65%,100%{transform:rotate(90deg)}}
+  #rotateBtn{position:fixed;top:10px;right:10px;z-index:120;width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:12px;border:2px solid rgba(255,224,102,.55);background:rgba(20,34,14,.72);color:#ffe066;font-size:24px;line-height:1;cursor:pointer;box-shadow:0 3px 0 rgba(0,0,0,.35);transition:transform .18s,background .18s,color .18s}
+  #rotateBtn:active{transform:scale(.94);background:rgba(40,66,26,.92)}
+  #rotateBtn.on{border-color:#8fe06a;color:#8fe06a;background:rgba(28,58,20,.92)}
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
-<div id="rotate"><div class="phone"></div><div>请横屏游玩</div><small>旋转手机后点击屏幕继续</small></div>
+<button id="rotateBtn" title="切换横屏 / 竖屏">⟳</button>
 <script>
 /* =========================================================
    植物大战李依然 —— 横板草坪塔防
@@ -30,7 +29,7 @@
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const rotateHint = document.getElementById('rotate');
+const rotateBtn = document.getElementById('rotateBtn');
 
 let W = 1280;
 const H = 720;
@@ -39,6 +38,10 @@ const LAWN_X = 210, LAWN_Y = 145, CELL_W = 108, CELL_H = 100;
 const LAWN_R = LAWN_X + COLS * CELL_W;
 const LAWN_B = LAWN_Y + ROWS * CELL_H;
 const WAVES = 12;
+const SAD_RATE = 0.40;    // 普通僵尸中被刷成忧郁李依然的概率
+const SAD_MIN = 15;       // 忧郁李依然僵尸：每局保底数量
+const SAD_PIERCE = 3;     // 投出的水滴可穿透的格数
+const SAD_DMG = 88;       // 普通僵尸啃食 80/秒 × 1.1
 const FONT = '"Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif';
 
 /* ---------------- utils ---------------- */
@@ -212,15 +215,17 @@ function tone(freq, dur, type = 'square', vol = 0.05, slide = 0) {
 const PLANTS = {
   sunflower:  { name: '阳光李依然', cost: 50,  cd: 7.5, hp: 300 },
   peashooter: { name: '生气李依然', cost: 100, cd: 7.5, hp: 300 },
-  wallnut:    { name: '防御李依然', cost: 50,  cd: 25,  hp: 3000 }
+  wallnut:    { name: '防御李依然', cost: 50,  cd: 25,  hp: 3000 },
+  jalapeno:   { name: '火爆李依然', cost: 125, cd: 50,  hp: 300 }
 };
 const CARDS = [
   { id: 'sunflower',  name: '阳光李依然', cost: 50,  cd: 7.5, cdLeft: 0, x: 178 },
   { id: 'peashooter', name: '生气李依然', cost: 100, cd: 7.5, cdLeft: 0, x: 294 },
-  { id: 'wallnut',    name: '防御李依然', cost: 50,  cd: 25,  cdLeft: 0, x: 410 }
+  { id: 'wallnut',    name: '防御李依然', cost: 50,  cd: 25,  cdLeft: 0, x: 410 },
+  { id: 'jalapeno',   name: '火爆李依然', cost: 125, cd: 50,  cdLeft: 0, x: 526 }
 ];
 const CARD_Y = 6, CARD_W = 106, CARD_H = 118;
-const SHOVEL_RECT = { x: 526, y: 18, w: 96, h: 96 };
+const SHOVEL_RECT = { x: 642, y: 18, w: 96, h: 96 };
 const PAUSE_RECT  = { x: 1206, y: 18, w: 44, h: 44 };
 const MUTE_RECT   = { x: 1152, y: 18, w: 44, h: 44 };
 const START_BTN   = { x: 490, y: 492, w: 300, h: 66 };
@@ -231,12 +236,13 @@ const START_PANEL = { x: 310, y: 78, w: 660, h: 554 };
    宽横屏：世界宽度跟着拉宽，画布铺满整块屏幕（无黑边、无拉伸）
    窄横屏/竖屏：按 16:9 缩放并居中，保证比例不拉伸 */
 let dpr = 1;
+let forceRotate = false;   // 右上角旋转按钮：把画面转 90° 铺满与当前方向相反的那一边
 function layout() {
   const vw = window.innerWidth, vh = window.innerHeight;
   const portrait = vh > vw;
   const aspect = vw / vh;
 
-  if (!portrait && aspect >= 1.6) {
+  if (!forceRotate && !portrait && aspect >= 1.6) {
     W = Math.round(clamp(720 * aspect, 1280, 2200));
   } else {
     W = 1280;
@@ -247,27 +253,42 @@ function layout() {
   canvas.height = Math.round(720 * dpr);
 
   // 按世界比例缩放 CSS 尺寸，短边对齐视口，多余部分由黑底居中（不拉伸）
-  const scale = Math.min(vw / W, vh / 720);
-  canvas.style.width = Math.round(W * scale) + 'px';
-  canvas.style.height = Math.round(720 * scale) + 'px';
+  if (forceRotate) {
+    // 转 90° 后屏幕占位是 720s 宽 × Ws 高，刚好铺满另一个方向
+    const s = Math.min(vw / 720, vh / W);
+    canvas.style.width = Math.round(W * s) + 'px';
+    canvas.style.height = Math.round(720 * s) + 'px';
+    canvas.style.transform = 'rotate(90deg)';
+  } else {
+    const scale = Math.min(vw / W, vh / 720);
+    canvas.style.width = Math.round(W * scale) + 'px';
+    canvas.style.height = Math.round(720 * scale) + 'px';
+    canvas.style.transform = 'none';
+  }
 
-  PAUSE_RECT.x = W - 74;
-  MUTE_RECT.x = W - 128;
+  PAUSE_RECT.x = W - 134;
+  MUTE_RECT.x = W - 188;
   START_BTN.x = W / 2 - 150;
   RESTART_BTN.x = W / 2 - 160;
   START_PANEL.x = W / 2 - 330;
-  rotateHint.style.display = (portrait && vw < 1000) ? 'flex' : 'none';
-  if (portrait && game.started && !game.over) game.paused = true;
 }
 window.addEventListener('resize', layout);
 window.addEventListener('orientationchange', () => setTimeout(layout, 280));
+rotateBtn.addEventListener('click', e => {
+  e.preventDefault(); e.stopPropagation();
+  forceRotate = !forceRotate;
+  rotateBtn.classList.toggle('on', forceRotate);
+  layout();
+});
 
 let game = {
   started: false, paused: false, over: false, win: false,
   sun: 100, time: 0, wave: 0, waveTimer: 14, sunTimer: 7,
-  spawnQueue: [], zombiesKilled: 0, bigWaveMsg: 0, winDelay: 0, shake: 0
+  spawnQueue: [], zombiesKilled: 0, bigWaveMsg: 0, winDelay: 0, shake: 0,
+  sadPlanned: 0, sadSpawned: 0
 };
 let plants = [], zombies = [], peas = [], suns = [], mowers = [], particles = [], texts = [];
+let drops = [], booms = [];
 let selected = null;
 const mouse = { x: -99, y: -99 };
 let animT = 0;
@@ -286,6 +307,8 @@ function resetGame() {
   game.sun = 100; game.time = 0; game.wave = 0;
   game.waveTimer = 14; game.sunTimer = 7;
   game.spawnQueue = []; game.zombiesKilled = 0;
+  drops = []; booms = [];
+  game.sadPlanned = 0; game.sadSpawned = 0;
   game.over = false; game.win = false; game.paused = false;
   game.bigWaveMsg = 0; game.winDelay = 0; game.shake = 0;
   selected = null;
@@ -336,6 +359,17 @@ function spawnWave() {
       wave: w
     });
   }
+  // 普通僵尸中有 SAD_RATE 概率刷成忧郁李依然；全场保底 SAD_MIN 个
+  const from = game.spawnQueue.length - count;
+  for (let i = from; i < game.spawnQueue.length; i++) {
+    if (Math.random() < SAD_RATE) { game.spawnQueue[i].sad = true; game.sadPlanned++; }
+  }
+  if (w >= WAVES - 1 && game.sadPlanned < SAD_MIN) {
+    let need = SAD_MIN - game.sadPlanned;
+    for (let i = from; i < game.spawnQueue.length && need > 0; i++) {
+      if (!game.spawnQueue[i].sad) { game.spawnQueue[i].sad = true; game.sadPlanned++; need--; }
+    }
+  }
   game.waveTimer = game.time + 22;
 }
 /* 厚血僵尸出现概率：第 4 波起每推进一波 +15%，最高 75% */
@@ -343,15 +377,19 @@ function thickChance(w) {
   return w <= 3 ? 0 : Math.min(0.75, (w - 3) * 0.15);
 }
 function spawnZombie(q) {
-  const thick = Math.random() < thickChance(q.wave);
+  const sad = !!q.sad;
+  const thick = !sad && Math.random() < thickChance(q.wave);
   let hp = 140 + q.wave * 10 + rand(-8, 8);
+  if (sad) hp = Math.round(hp * 1.5);   // 忧郁李依然：正常僵尸的 1.5 倍血量
   if (thick) hp = Math.round(hp * 1.5);
   zombies.push({
     row: q.row, x: W + rand(15, 75), hp, maxHp: hp,
     speed: 14 + q.wave * 0.25 + rand(0, 4),
     anim: rand(0, 10), seed: rand(0, 6.28),
-    eating: false, flash: 0, thick
+    eating: false, flash: 0, thick, sad,
+    throwTimer: 0.8 + rand(0, 0.6), throwAnim: 0
   });
+  if (sad) game.sadSpawned++;
 }
 
 /* ---------------- placement ---------------- */
@@ -371,7 +409,8 @@ function placePlant(cell, type) {
     type, row: cell.row, col: cell.col,
     cx: cellCX(cell.col), baseY: rowBaseY(cell.row),
     hp: PLANTS[type].hp, maxHp: PLANTS[type].hp,
-    prodTimer: 4.8, fireTimer: 0.7, recoil: 0, pulse: 0, seed: rand(0, 6.28)
+    prodTimer: 4.8, fireTimer: 0.7, recoil: 0, pulse: 0, seed: rand(0, 6.28),
+    fuse: type === 'jalapeno' ? 0.35 : -1
   });
   burst(cellCX(cell.col), rowBaseY(cell.row) - 8, '#9bdc55', 12, 110);
   selected = null;
@@ -419,6 +458,11 @@ function update(dt) {
 
   /* --- plants --- */
   for (const p of plants) {
+    if (p.fuse > 0) {
+      p.fuse -= dt;
+      if (p.fuse <= 0) { explodeJalapeno(p); p.hp = 0; }
+      continue;
+    }
     if (p.type === 'sunflower') {
       p.prodTimer -= dt;
       if (p.pulse > 0) p.pulse = Math.max(0, p.pulse - dt * 2.2);
@@ -446,6 +490,36 @@ function update(dt) {
   for (const z of zombies) {
     z.anim += dt;
     if (z.flash > 0) z.flash -= dt;
+    if (z.throwAnim > 0) z.throwAnim = Math.max(0, z.throwAnim - dt * 2.4);
+
+    /* 忧郁李依然：不啃食，远程投掷水滴，攻击距离比普通僵尸多 1 格 */
+    if (z.sad) {
+      const reach = 56 + CELL_W;
+      let target = null;
+      for (const p of plants) {
+        if (p.row !== z.row) continue;
+        if (p.cx >= z.x - reach && p.cx <= z.x + 8) {
+          if (!target || p.cx > target.cx) target = p;
+        }
+      }
+      z.eating = false;
+      if (target) {
+        z.throwTimer -= dt;
+        if (z.throwTimer <= 0) {
+          z.throwTimer = 1.7;
+          z.throwAnim = 1;
+          drops.push({
+            x: z.x - 30, y: rowBaseY(z.row) - 52, row: z.row,
+            vx: -360, traveled: 0, max: CELL_W * SAD_PIERCE, hit: []
+          });
+          tone(430, 0.09, 'sine', 0.03, -140);
+        }
+      } else {
+        z.x -= z.speed * dt;
+      }
+      continue;
+    }
+
     let target = null;
     for (const p of plants) {
       if (p.row !== z.row) continue;
@@ -504,6 +578,25 @@ function update(dt) {
     }
   }
 
+  /* --- 忧郁李依然投出的水滴：穿透 SAD_PIERCE 格 --- */
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i];
+    d.x += d.vx * dt;
+    d.traveled += -d.vx * dt;
+    for (const p of plants) {
+      if (p.row !== d.row || p.hp <= 0) continue;
+      if (d.hit.indexOf(p) >= 0) continue;
+      if (Math.abs(d.x - p.cx) < 26) {
+        d.hit.push(p);
+        p.hp -= SAD_DMG;
+        burst(p.cx, p.baseY - 40, '#8ad0ff', 6, 90);
+        tone(320, 0.05, 'sine', 0.02, -70);
+      }
+    }
+    if (d.traveled >= d.max || d.x < 60) drops.splice(i, 1);
+  }
+  plants = plants.filter(p => p.hp > 0);
+
   /* --- zombie deaths --- */
   for (let i = zombies.length - 1; i >= 0; i--) {
     const z = zombies[i];
@@ -546,6 +639,8 @@ function update(dt) {
     p.life -= dt;
   }
   particles = particles.filter(p => p.life > 0);
+  for (const b of booms) b.life -= dt;
+  booms = booms.filter(b => b.life > 0);
   for (const t of texts) { t.y -= 34 * dt; t.life -= dt; }
   texts = texts.filter(t => t.life > 0);
 
@@ -561,6 +656,34 @@ function update(dt) {
   } else {
     game.winDelay = 0;
   }
+}
+
+/* 火爆李依然：以自身为中心 3×3 范围爆燃，范围内的僵尸全部烧掉 */
+function explodeJalapeno(p) {
+  const c0 = Math.max(0, p.col - 1), c1 = Math.min(COLS - 1, p.col + 1);
+  const r0 = Math.max(0, p.row - 1), r1 = Math.min(ROWS - 1, p.row + 1);
+  const x0 = LAWN_X + c0 * CELL_W, x1 = LAWN_X + (c1 + 1) * CELL_W;
+  for (const z of zombies) {
+    if (z.row < r0 || z.row > r1) continue;
+    if (z.x < x0 || z.x > x1) continue;
+    z.hp -= 1800;
+    z.flash = 0.2;
+  }
+  const cy = rowBaseY(p.row) - 46;
+  booms.push({ x: p.cx, y: cy, life: 0.8, max: 0.8, r: CELL_W * 1.85 });
+  for (let i = 0; i < 26; i++) {
+    const a = rand(0, Math.PI * 2);
+    particles.push({
+      x: p.cx, y: cy, vx: Math.cos(a) * rand(80, 260), vy: Math.sin(a) * rand(60, 200) - 60,
+      life: rand(0.4, 0.9), max: 0.9,
+      color: i % 3 === 0 ? '#ffe066' : i % 3 === 1 ? '#ff8a2a' : '#e0341a',
+      size: rand(3, 7)
+    });
+  }
+  game.shake = 1;
+  addText('火爆李依然！', p.cx, cy - 40, '#ffca4a');
+  tone(120, 0.5, 'sawtooth', 0.07, -60);
+  setTimeout(() => tone(80, 0.45, 'sawtooth', 0.06, -40), 90);
 }
 
 /* ---------------- background ---------------- */
@@ -850,9 +973,57 @@ function drawWallnut(hpRatio = 1, wobble = 0) {
   ctx.restore();
 }
 
+/* 火爆李依然 —— 辣椒形，身上带火光 */
+function drawJalapeno(t) {
+  ctx.save();
+  ctx.rotate(Math.sin(t * 2.2) * 0.04);
+  // 火光
+  const glow = ctx.createRadialGradient(0, -48, 8, 0, -48, 58);
+  glow.addColorStop(0, 'rgba(255,190,80,0.32)');
+  glow.addColorStop(1, 'rgba(255,110,20,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0, -48, 58, 0, 7); ctx.fill();
+  // 辣椒身体
+  const g = ctx.createLinearGradient(-22, -80, 22, -6);
+  g.addColorStop(0, '#ff7a55');
+  g.addColorStop(0.45, '#e42a18');
+  g.addColorStop(1, '#961207');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(0, -88);
+  ctx.bezierCurveTo(20, -78, 26, -46, 18, -16);
+  ctx.bezierCurveTo(10, 3, -10, 3, -18, -16);
+  ctx.bezierCurveTo(-26, -46, -20, -78, 0, -88);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#7d0f06'; ctx.lineWidth = 2.5; ctx.stroke();
+  // 高光
+  ctx.fillStyle = 'rgba(255,255,255,0.30)';
+  ctx.beginPath(); ctx.ellipse(-9, -60, 6, 15, 0.35, 0, 7); ctx.fill();
+  // 梗和叶
+  ctx.strokeStyle = '#3f7a22'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, -86); ctx.quadraticCurveTo(4, -96, 13, -100); ctx.stroke();
+  ctx.fillStyle = '#54a12c';
+  ctx.beginPath(); ctx.ellipse(17, -100, 12, 6, -0.45, 0, 7); ctx.fill();
+  // 生气的眉眼
+  ctx.strokeStyle = '#4a0b04'; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-16, -62); ctx.lineTo(-5, -55); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(16, -62); ctx.lineTo(5, -55); ctx.stroke();
+  ctx.fillStyle = '#fff4d8';
+  ctx.beginPath(); ctx.arc(-9, -48, 5.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(9, -48, 5.4, 0, 7); ctx.fill();
+  ctx.fillStyle = '#4a0b04';
+  ctx.beginPath(); ctx.arc(-8, -47, 2.8, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -47, 2.8, 0, 7); ctx.fill();
+  // 咬牙
+  ctx.strokeStyle = '#4a0b04'; ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.moveTo(-8, -32); ctx.lineTo(-3, -27); ctx.lineTo(2, -32); ctx.lineTo(7, -27); ctx.stroke();
+  ctx.restore();
+}
+
 function drawPlantByType(type, t, recoil, hpRatio, wobble) {
   if (type === 'sunflower') drawSunflower(t);
   else if (type === 'peashooter') drawPeashooter(t, recoil);
+  else if (type === 'jalapeno') drawJalapeno(t);
   else drawWallnut(hpRatio, wobble);
 }
 
@@ -890,6 +1061,55 @@ function drawPeas() {
   }
 }
 
+/* ---------------- 水滴 / 爆燃 ---------------- */
+function drawWaterDrop(x, y, r, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, 1, x, y, r);
+  g.addColorStop(0, '#e6f7ff');
+  g.addColorStop(0.45, '#7cc8ff');
+  g.addColorStop(1, '#2f8fe0');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x, y - r * 1.6);
+  ctx.bezierCurveTo(x + r * 0.95, y - r * 0.3, x + r * 0.95, y + r * 0.45, x + r * 0.2, y + r);
+  ctx.bezierCurveTo(x - r * 0.65, y + r * 0.75, x - r * 0.9, y + r * 0.15, x, y - r * 1.6);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(28,108,190,0.55)'; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath(); ctx.ellipse(x - r * 0.3, y + r * 0.05, r * 0.2, r * 0.3, -0.4, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawDrops() {
+  for (const d of drops) {
+    ctx.save();
+    ctx.globalAlpha = 0.3;
+    ctx.strokeStyle = '#9ad8ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(d.x + 26, d.y + 3); ctx.lineTo(d.x + 7, d.y); ctx.stroke();
+    ctx.restore();
+    drawWaterDrop(d.x, d.y, 9, 0.95);
+  }
+}
+
+function drawBooms() {
+  for (const b of booms) {
+    const k = 1 - b.life / b.max;
+    const a = clamp(b.life / b.max, 0, 1);
+    const R = b.r * (0.35 + k * 0.85);
+    ctx.save();
+    ctx.globalAlpha = a;
+    const g = ctx.createRadialGradient(b.x, b.y, R * 0.12, b.x, b.y, R);
+    g.addColorStop(0, 'rgba(255,255,225,0.95)');
+    g.addColorStop(0.32, 'rgba(255,198,70,0.88)');
+    g.addColorStop(0.68, 'rgba(240,92,22,0.55)');
+    g.addColorStop(1, 'rgba(150,20,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(b.x, b.y, R, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+}
+
 /* ---------------- zombies art ---------------- */
 function drawZombie(z) {
   const baseY = rowBaseY(z.row) + 8;
@@ -911,6 +1131,19 @@ function drawZombie(z) {
     ctx.strokeStyle = 'rgba(255,95,70,' + (0.85 * pulse).toFixed(3) + ')';
     ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.ellipse(0, 0, 30, 10, 0, 0, 7); ctx.stroke();
+  }
+  // 忧郁李依然：脚边环绕的蓝色水光
+  if (z.sad) {
+    const pulse = 0.5 + 0.5 * Math.sin(animT * 3 + z.seed);
+    const halo = ctx.createRadialGradient(0, 0, 4, 0, 0, 48);
+    halo.addColorStop(0, 'rgba(95,190,255,' + (0.40 * pulse).toFixed(3) + ')');
+    halo.addColorStop(0.6, 'rgba(55,140,235,' + (0.20 * pulse).toFixed(3) + ')');
+    halo.addColorStop(1, 'rgba(30,110,210,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.ellipse(0, 0, 48, 17, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(130,210,255,' + (0.75 * pulse).toFixed(3) + ')';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.ellipse(0, 0, 32, 11, 0, 0, 7); ctx.stroke();
   }
   // shadow
   ctx.fillStyle = 'rgba(0,0,0,0.22)';
@@ -1012,6 +1245,14 @@ function drawZombie(z) {
     ctx.globalAlpha = 1;
   }
   ctx.restore();
+
+  // 忧郁李依然：周身环绕的水滴💧
+  if (z.sad) {
+    for (let i = 0; i < 4; i++) {
+      const a = animT * 1.9 + z.seed + i * (Math.PI / 2);
+      drawWaterDrop(Math.cos(a) * 46, -58 + Math.sin(a) * 18, 7.5 + Math.sin(a) * 1.4, 0.88);
+    }
+  }
 
   // hp bar
   if (z.hp < z.maxHp - 0.5) {
@@ -1476,9 +1717,10 @@ function drawStart() {
 
   // plant showcase
   const items = [
-    { id: 'sunflower',  x: W / 2 - 220 },
-    { id: 'peashooter', x: W / 2 },
-    { id: 'wallnut',    x: W / 2 + 220 }
+    { id: 'sunflower',  x: W / 2 - 240 },
+    { id: 'peashooter', x: W / 2 - 80 },
+    { id: 'wallnut',    x: W / 2 + 80 },
+    { id: 'jalapeno',   x: W / 2 + 240 }
   ];
   for (const it of items) {
     ctx.save();
@@ -1540,6 +1782,8 @@ function render() {
   drawPlants();
   drawPeas();
   drawZombies();
+  drawDrops();
+  drawBooms();
   drawSuns();
   drawParticles();
   drawTexts();
@@ -1556,6 +1800,14 @@ function render() {
 
 /* ---------------- input ---------------- */
 function toCanvas(e) {
+  if (forceRotate) {
+    // 画面被旋转 90°，这里按逆变换把屏幕坐标映射回游戏坐标
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const s = Math.min(vw / 720, vh / W);
+    const u = (W * s) / 2 + (e.clientY - vh / 2);
+    const v = (720 * s) / 2 - (e.clientX - vw / 2);
+    return { x: u / s, y: v / s };
+  }
   const r = canvas.getBoundingClientRect();
   return {
     x: (e.clientX - r.left) * (W / r.width),
