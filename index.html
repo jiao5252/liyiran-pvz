@@ -1,0 +1,1663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>植物大战李依然</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0;background:#0b1408;overflow:hidden;overscroll-behavior:none}
+  body{display:flex;align-items:center;justify-content:center;font-family:"Microsoft YaHei","PingFang SC",sans-serif}
+  #wrap{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  canvas{width:100%;height:100%;display:block;cursor:pointer;touch-action:none;background:#79b64f}
+  #rotate{position:fixed;inset:0;z-index:99;display:none;flex-direction:column;align-items:center;justify-content:center;gap:20px;background:radial-gradient(circle at 50% 40%,#1d3315,#0a1207);color:#ffe066;font-size:20px;letter-spacing:2px}
+  #rotate .phone{width:66px;height:118px;border:5px solid #ffe066;border-radius:14px;box-shadow:0 0 22px rgba(255,224,102,.45);animation:rot 1.8s ease-in-out infinite}
+  #rotate small{color:#9fb884;font-size:13px;letter-spacing:1px}
+  @keyframes rot{0%,35%{transform:rotate(0)}65%,100%{transform:rotate(90deg)}}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+<div id="rotate"><div class="phone"></div><div>请横屏游玩</div><small>旋转手机后点击屏幕继续</small></div>
+<script>
+/* =========================================================
+   植物大战李依然 —— 横板草坪塔防
+   向日葵 -> 阳光李依然
+   豌豆射手 -> 生气李依然
+   高坚果 -> 防御李依然
+   僵尸 -> 伤心李依然
+   ========================================================= */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const rotateHint = document.getElementById('rotate');
+
+let W = 1280;
+const H = 720;
+const ROWS = 5, COLS = 9;
+const LAWN_X = 210, LAWN_Y = 145, CELL_W = 108, CELL_H = 100;
+const LAWN_R = LAWN_X + COLS * CELL_W;
+const LAWN_B = LAWN_Y + ROWS * CELL_H;
+const WAVES = 12;
+const FONT = '"Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif';
+
+/* ---------------- utils ---------------- */
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function rr(x, y, w, h, r) {
+  r = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function inRect(px, py, r) { return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h; }
+function text(str, x, y, size, color, align = 'center', bold = true, stroke = null) {
+  ctx.font = (bold ? 'bold ' : '') + size + 'px ' + FONT;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (stroke) {
+    ctx.strokeStyle = stroke; ctx.lineWidth = Math.max(2, size * 0.16);
+    ctx.lineJoin = 'round'; ctx.strokeText(str, x, y);
+  }
+  ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+const cellCX = c => LAWN_X + c * CELL_W + CELL_W / 2;
+const rowBaseY = r => LAWN_Y + r * CELL_H + CELL_H / 2 + 34;
+
+/* ---------------- audio ---------------- */
+let actx = null, muted = false;
+
+/* ---- 背景音乐 ----
+   优先循环播放同目录下的 music.mp3（把歌曲文件命名为 music.mp3 放在本页面旁边即可）；
+   若文件缺失或无法播放，自动改用内置的轻柔循环旋律。 */
+const bgm = new Audio();
+bgm.src = 'music.mp3';
+bgm.loop = true;
+bgm.preload = 'auto';
+bgm.volume = 0.6;
+bgm.setAttribute('playsinline', '');
+let bgmFailed = false;
+let musicStarted = false;
+let songPlaying = false;
+let synthOn = false;
+let songRetry = 0;
+let songFallbackTimer = null;
+let bgmErrorCount = 0;
+bgm.addEventListener('error', () => {
+  bgmErrorCount++;
+  songPlaying = false;
+  if (bgmErrorCount >= 3) {
+    bgmFailed = true;
+    if (musicStarted && !muted) startSynthBgm();
+    return;
+  }
+  // 网络抖动时重新加载并重试，不立刻放弃歌曲
+  setTimeout(() => {
+    try { bgm.load(); } catch (e) {}
+    if (musicStarted && !muted) playSong();
+  }, 1000 * bgmErrorCount);
+});
+bgm.addEventListener('playing', () => { songPlaying = true; bgmFailed = false; stopSynthBgm(); });
+
+/* 内置循环音乐（梦幻暧昧和弦，4 段 12.8 秒循环） */
+const BGM_CHORDS = [
+  [146.83, 220.00, 293.66, 369.99], // Dmaj7
+  [123.47, 185.00, 246.94, 293.66], // Bm7
+  [98.00, 146.83, 196.00, 246.94],  // Gmaj7
+  [110.00, 164.81, 220.00, 277.18]  // A7
+];
+let bgmStep = 0, bgmTimer = null, bgmBus = null;
+
+function initAudio() {
+  if (!actx) {
+    try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+  }
+  if (actx && actx.state === 'suspended') { try { actx.resume(); } catch (e) {} }
+  startMusic();
+}
+function startMusic() {
+  if (muted) return;
+  if (musicStarted) {
+    if (!songPlaying && !synthOn) playSong();
+    return;
+  }
+  musicStarted = true;
+  playSong();
+}
+/* 播放歌曲：失败/被拦截/加载太慢时自动重试，并用合成音乐先垫着 */
+function playSong() {
+  if (muted || songPlaying) return;
+  if (bgmFailed) { startSynthBgm(); return; }
+  const p = bgm.play();
+  if (p && p.catch) {
+    p.catch(() => {
+      if (songRetry < 4) { songRetry++; setTimeout(playSong, 450 * songRetry); }
+      else { startSynthBgm(); }
+    });
+  }
+  clearTimeout(songFallbackTimer);
+  songFallbackTimer = setTimeout(() => {
+    if (!muted && !songPlaying && bgm.paused) startSynthBgm();
+  }, 2500);
+}
+function startSynthBgm() {
+  if (!actx || bgmTimer) return;
+  synthOn = true;
+  bgmBus = actx.createGain();
+  bgmBus.gain.value = 0.9;
+  bgmBus.connect(actx.destination);
+  const playChord = () => {
+    if (!actx || muted) return;
+    const chord = BGM_CHORDS[bgmStep % BGM_CHORDS.length];
+    bgmStep++;
+    chord.forEach((f, i) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = i === 0 ? 'sine' : 'triangle';
+      o.frequency.value = f;
+      const t0 = actx.currentTime + i * 0.08;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.05, t0 + 1.3);
+      g.gain.linearRampToValueAtTime(0.0001, t0 + 3.5);
+      o.connect(g); g.connect(bgmBus);
+      o.start(t0); o.stop(t0 + 3.7);
+    });
+  };
+  playChord();
+  bgmTimer = setInterval(playChord, 3200);
+}
+function stopSynthBgm() {
+  synthOn = false;
+  if (bgmTimer) { clearInterval(bgmTimer); bgmTimer = null; }
+  if (bgmBus) {
+    try { bgmBus.disconnect(); } catch (e) {}
+    bgmBus = null;
+  }
+}
+/* 微信/iOS：桥接就绪、切回前台、任意位置轻触都尝试启动/恢复歌曲 */
+document.addEventListener('WeixinJSBridgeReady', () => { initAudio(); }, false);
+document.addEventListener('pointerdown', () => { initAudio(); }, { passive: true });
+document.addEventListener('touchstart', () => { initAudio(); }, { passive: true });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && musicStarted && !muted && !songPlaying && !bgmFailed) playSong();
+});
+function setMuted(v) {
+  muted = v;
+  bgm.muted = v;
+  if (!v) {
+    if (actx && actx.state === 'suspended') { try { actx.resume(); } catch (e) {} }
+    if (!musicStarted) startMusic();
+    else if (!songPlaying) playSong();
+  }
+}
+
+function tone(freq, dur, type = 'square', vol = 0.05, slide = 0) {
+  if (!actx || muted) return;
+  try {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, actx.currentTime);
+    if (slide) o.frequency.linearRampToValueAtTime(Math.max(40, freq + slide), actx.currentTime + dur);
+    g.gain.setValueAtTime(vol, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + dur);
+  } catch (e) {}
+}
+
+/* ---------------- data ---------------- */
+const PLANTS = {
+  sunflower:  { name: '阳光李依然', cost: 50,  cd: 7.5, hp: 300 },
+  peashooter: { name: '生气李依然', cost: 100, cd: 7.5, hp: 300 },
+  wallnut:    { name: '防御李依然', cost: 50,  cd: 25,  hp: 3000 }
+};
+const CARDS = [
+  { id: 'sunflower',  name: '阳光李依然', cost: 50,  cd: 7.5, cdLeft: 0, x: 178 },
+  { id: 'peashooter', name: '生气李依然', cost: 100, cd: 7.5, cdLeft: 0, x: 294 },
+  { id: 'wallnut',    name: '防御李依然', cost: 50,  cd: 25,  cdLeft: 0, x: 410 }
+];
+const CARD_Y = 6, CARD_W = 106, CARD_H = 118;
+const SHOVEL_RECT = { x: 526, y: 18, w: 96, h: 96 };
+const PAUSE_RECT  = { x: 1206, y: 18, w: 44, h: 44 };
+const MUTE_RECT   = { x: 1152, y: 18, w: 44, h: 44 };
+const START_BTN   = { x: 490, y: 492, w: 300, h: 66 };
+const RESTART_BTN = { x: 480, y: 448, w: 320, h: 64 };
+const START_PANEL = { x: 310, y: 78, w: 660, h: 554 };
+
+/* 自适应全屏：高度固定 720，宽度随屏幕比例变化
+   宽横屏：世界宽度跟着拉宽，画布铺满整块屏幕（无黑边、无拉伸）
+   窄横屏/竖屏：按 16:9 缩放并居中，保证比例不拉伸 */
+let dpr = 1;
+function layout() {
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const portrait = vh > vw;
+  const aspect = vw / vh;
+
+  if (!portrait && aspect >= 1.6) {
+    W = Math.round(clamp(720 * aspect, 1280, 2200));
+  } else {
+    W = 1280;
+  }
+
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(720 * dpr);
+
+  // 按世界比例缩放 CSS 尺寸，短边对齐视口，多余部分由黑底居中（不拉伸）
+  const scale = Math.min(vw / W, vh / 720);
+  canvas.style.width = Math.round(W * scale) + 'px';
+  canvas.style.height = Math.round(720 * scale) + 'px';
+
+  PAUSE_RECT.x = W - 74;
+  MUTE_RECT.x = W - 128;
+  START_BTN.x = W / 2 - 150;
+  RESTART_BTN.x = W / 2 - 160;
+  START_PANEL.x = W / 2 - 330;
+  rotateHint.style.display = (portrait && vw < 1000) ? 'flex' : 'none';
+  if (portrait && game.started && !game.over) game.paused = true;
+}
+window.addEventListener('resize', layout);
+window.addEventListener('orientationchange', () => setTimeout(layout, 280));
+
+let game = {
+  started: false, paused: false, over: false, win: false,
+  sun: 100, time: 0, wave: 0, waveTimer: 14, sunTimer: 7,
+  spawnQueue: [], zombiesKilled: 0, bigWaveMsg: 0, winDelay: 0, shake: 0
+};
+let plants = [], zombies = [], peas = [], suns = [], mowers = [], particles = [], texts = [];
+let selected = null;
+const mouse = { x: -99, y: -99 };
+let animT = 0;
+
+const tufts = [];
+for (let i = 0; i < 240; i++) {
+  tufts.push({ x: rand(LAWN_X, LAWN_R), y: rand(LAWN_Y, LAWN_B), a: rand(-0.6, 0.6), l: rand(3, 9) });
+}
+
+/* ---------------- game control ---------------- */
+function resetGame() {
+  plants = []; zombies = []; peas = []; suns = []; particles = []; texts = [];
+  mowers = [];
+  for (let r = 0; r < ROWS; r++) mowers.push({ row: r, x: 196, state: 'idle', anim: 0 });
+  CARDS.forEach(c => c.cdLeft = 0);
+  game.sun = 100; game.time = 0; game.wave = 0;
+  game.waveTimer = 14; game.sunTimer = 7;
+  game.spawnQueue = []; game.zombiesKilled = 0;
+  game.over = false; game.win = false; game.paused = false;
+  game.bigWaveMsg = 0; game.winDelay = 0; game.shake = 0;
+  selected = null;
+}
+function startGame() {
+  resetGame();
+  game.started = true;
+  tone(520, 0.12, 'triangle', 0.06, 220);
+}
+
+function addText(str, x, y, color = '#fff') {
+  texts.push({ str, x, y, life: 1.1, max: 1.1, color });
+}
+function burst(x, y, color, n = 8, spd = 130) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2);
+    particles.push({
+      x, y, vx: Math.cos(a) * rand(20, spd), vy: Math.sin(a) * rand(20, spd) - 30,
+      life: rand(0.35, 0.8), max: 0.8, color, size: rand(2, 5)
+    });
+  }
+}
+
+/* ---------------- waves ---------------- */
+function pickRow() {
+  const counts = new Array(ROWS).fill(0);
+  for (const z of zombies) counts[z.row] += 2;
+  for (const q of game.spawnQueue) counts[q.row] += 1;
+  const min = Math.min(...counts);
+  const cand = [];
+  counts.forEach((c, i) => { if (c <= min + 0.5) cand.push(i); });
+  return cand[randInt(0, cand.length - 1)];
+}
+function spawnWave() {
+  game.wave++;
+  const w = game.wave;
+  let count = 1 + Math.floor(w * 0.6);
+  // 第 4 波起：每一波僵尸数量比基准多 20%×阶段数（线性叠加）
+  if (w > 3) count = Math.round(count * (1 + 0.2 * (w - 3)));
+  const big = (w % 6 === 0) || w === WAVES;
+  if (big) { count = Math.ceil(count * 1.8); game.bigWaveMsg = 3.4; tone(170, 0.55, 'sawtooth', 0.05, -70); }
+  if (w === WAVES) count = Math.max(count, 14);
+  count = Math.min(count, 45); // 上限，避免手机上同屏僵尸过多掉帧
+  for (let i = 0; i < count; i++) {
+    game.spawnQueue.push({
+      t: game.time + i * (big ? 0.6 : 2.0) + rand(0, 0.9),
+      row: pickRow(),
+      wave: w
+    });
+  }
+  game.waveTimer = game.time + 22;
+}
+/* 厚血僵尸出现概率：第 4 波起每推进一波 +15%，最高 75% */
+function thickChance(w) {
+  return w <= 3 ? 0 : Math.min(0.75, (w - 3) * 0.15);
+}
+function spawnZombie(q) {
+  const thick = Math.random() < thickChance(q.wave);
+  let hp = 140 + q.wave * 10 + rand(-8, 8);
+  if (thick) hp = Math.round(hp * 1.5);
+  zombies.push({
+    row: q.row, x: W + rand(15, 75), hp, maxHp: hp,
+    speed: 14 + q.wave * 0.25 + rand(0, 4),
+    anim: rand(0, 10), seed: rand(0, 6.28),
+    eating: false, flash: 0, thick
+  });
+}
+
+/* ---------------- placement ---------------- */
+function plantAt(row, col) { return plants.find(p => p.row === row && p.col === col); }
+function cellAt(x, y) {
+  if (x < LAWN_X || x >= LAWN_R || y < LAWN_Y || y >= LAWN_B) return null;
+  return { row: Math.floor((y - LAWN_Y) / CELL_H), col: Math.floor((x - LAWN_X) / CELL_W) };
+}
+function placePlant(cell, type) {
+  const card = CARDS.find(c => c.id === type);
+  if (plantAt(cell.row, cell.col)) { addText('这里已经有植物了', cellCX(cell.col), rowBaseY(cell.row) - 80, '#ffe08a'); return; }
+  if (card.cdLeft > 0) { addText('冷却中', cellCX(cell.col), rowBaseY(cell.row) - 80, '#fff'); return; }
+  if (game.sun < card.cost) { addText('阳光不足', cellCX(cell.col), rowBaseY(cell.row) - 80, '#ff8a7a'); tone(150, 0.12, 'square', 0.04, -30); return; }
+  game.sun -= card.cost;
+  card.cdLeft = card.cd;
+  plants.push({
+    type, row: cell.row, col: cell.col,
+    cx: cellCX(cell.col), baseY: rowBaseY(cell.row),
+    hp: PLANTS[type].hp, maxHp: PLANTS[type].hp,
+    prodTimer: 4.8, fireTimer: 0.7, recoil: 0, pulse: 0, seed: rand(0, 6.28)
+  });
+  burst(cellCX(cell.col), rowBaseY(cell.row) - 8, '#9bdc55', 12, 110);
+  selected = null;
+  tone(type === 'peashooter' ? 300 : 420, 0.12, 'triangle', 0.06, 160);
+}
+function removePlantAt(cell) {
+  const p = plantAt(cell.row, cell.col);
+  if (!p) return;
+  plants = plants.filter(x => x !== p);
+  burst(p.cx, p.baseY - 20, '#9bdc55', 10, 100);
+  addText('铲除', p.cx, p.baseY - 90, '#ffe08a');
+  selected = null;
+  tone(260, 0.1, 'square', 0.05, -100);
+}
+function collectSun(i) {
+  const s = suns[i];
+  game.sun += s.value;
+  addText('+' + s.value, s.x, s.y - 10, '#ffe45c');
+  burst(s.x, s.y, '#ffe45c', 10, 120);
+  suns.splice(i, 1);
+  tone(760, 0.12, 'sine', 0.06, 320);
+}
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  game.time += dt;
+  if (game.bigWaveMsg > 0) game.bigWaveMsg -= dt;
+  if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 3);
+
+  for (const c of CARDS) c.cdLeft = Math.max(0, c.cdLeft - dt);
+
+  if (game.time >= game.waveTimer && game.wave < WAVES) spawnWave();
+
+  for (let i = game.spawnQueue.length - 1; i >= 0; i--) {
+    if (game.time >= game.spawnQueue[i].t) {
+      spawnZombie(game.spawnQueue[i]);
+      game.spawnQueue.splice(i, 1);
+    }
+  }
+
+  if (game.time >= game.sunTimer) {
+    suns.push(makeSun(rand(LAWN_X + 60, LAWN_R - 60), -30, rand(LAWN_Y + 80, LAWN_B - 60), 25));
+    game.sunTimer = game.time + rand(7.5, 11);
+  }
+
+  /* --- plants --- */
+  for (const p of plants) {
+    if (p.type === 'sunflower') {
+      p.prodTimer -= dt;
+      if (p.pulse > 0) p.pulse = Math.max(0, p.pulse - dt * 2.2);
+      if (p.prodTimer <= 0) {
+        p.prodTimer = 9;
+        p.pulse = 1;
+        suns.push(makeSun(p.cx + rand(-12, 12), p.baseY - 62, p.baseY - 26, 25));
+        tone(620, 0.1, 'sine', 0.04, 180);
+      }
+    } else if (p.type === 'peashooter') {
+      if (p.recoil > 0) p.recoil = Math.max(0, p.recoil - dt * 6);
+      p.fireTimer -= dt;
+      const hasTarget = zombies.some(z => z.row === p.row && z.x > p.cx - 20 && z.x < W + 90);
+      if (hasTarget && p.fireTimer <= 0) {
+        p.fireTimer = 1.45;
+        p.recoil = 1;
+        peas.push({ x: p.cx + 30, y: p.baseY - 32, row: p.row, vx: 430 });
+        tone(560, 0.05, 'square', 0.02, -140);
+      }
+    }
+  }
+  plants = plants.filter(p => p.hp > 0);
+
+  /* --- zombies --- */
+  for (const z of zombies) {
+    z.anim += dt;
+    if (z.flash > 0) z.flash -= dt;
+    let target = null;
+    for (const p of plants) {
+      if (p.row !== z.row) continue;
+      if (p.cx >= z.x - 56 && p.cx <= z.x + 8) {
+        if (!target || p.cx > target.cx) target = p;
+      }
+    }
+    if (target) {
+      z.eating = true;
+      target.hp -= 80 * dt;
+      if (Math.random() < dt * 8) burst(target.cx + 6, target.baseY - 30, '#7fc23f', 3, 70);
+    } else {
+      z.eating = false;
+      z.x -= z.speed * dt;
+    }
+  }
+  plants = plants.filter(p => p.hp > 0);
+
+  /* --- mowers --- */
+  for (const m of mowers) {
+    m.anim += dt;
+    if (m.state === 'idle') {
+      if (zombies.some(z => z.row === m.row && z.x < LAWN_X + 22)) {
+        m.state = 'run';
+        tone(180, 0.6, 'sawtooth', 0.06, 320);
+        game.shake = 0.5;
+      }
+    } else if (m.state === 'run') {
+      m.x += 640 * dt;
+      for (const z of zombies) {
+        if (z.row === m.row && z.x < m.x + 52 && z.x > m.x - 100) z.hp = 0;
+      }
+      if (Math.random() < dt * 24) {
+        particles.push({ x: m.x - 20, y: rowBaseY(m.row) - 6, vx: rand(-60, -10), vy: rand(-50, -10), life: 0.5, max: 0.5, color: '#c9b281', size: rand(2, 5) });
+      }
+      if (m.x > W + 100) m.state = 'gone';
+    }
+  }
+
+  /* --- peas --- */
+  for (let i = peas.length - 1; i >= 0; i--) {
+    const pea = peas[i];
+    pea.x += pea.vx * dt;
+    if (pea.x > W + 40) { peas.splice(i, 1); continue; }
+    let hit = null;
+    for (const z of zombies) {
+      if (z.row !== pea.row) continue;
+      if (pea.x > z.x - 24 && pea.x < z.x + 22) { hit = z; break; }
+    }
+    if (hit) {
+      hit.hp -= 20;
+      hit.flash = 0.16;
+      burst(pea.x, pea.y, '#a7e35a', 5, 80);
+      peas.splice(i, 1);
+      tone(180, 0.04, 'square', 0.02);
+    }
+  }
+
+  /* --- zombie deaths --- */
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    if (z.hp <= 0) {
+      burst(z.x, rowBaseY(z.row) - 40, '#b9c7a4', 14, 160);
+      burst(z.x, rowBaseY(z.row) - 60, '#5f7080', 8, 130);
+      zombies.splice(i, 1);
+      game.zombiesKilled++;
+      tone(95, 0.25, 'sawtooth', 0.045, -40);
+    }
+  }
+
+  /* --- lose --- */
+  for (const z of zombies) {
+    if (z.x < 132 && mowers[z.row].state === 'gone') {
+      game.over = true;
+      game.win = false;
+      tone(220, 0.7, 'sawtooth', 0.08, -160);
+      setTimeout(() => tone(140, 0.9, 'sawtooth', 0.08, -90), 260);
+      return;
+    }
+  }
+
+  /* --- suns --- */
+  for (const s of suns) {
+    s.spin += dt * 0.9;
+    s.sc = Math.min(1, s.sc + dt * 3.2);
+    if (!s.landed) {
+      s.y += 90 * dt;
+      if (s.y >= s.targetY) { s.y = s.targetY; s.landed = true; }
+    }
+    s.life -= dt;
+  }
+  suns = suns.filter(s => s.life > 0);
+
+  /* --- particles / texts --- */
+  for (const p of particles) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 260 * dt;
+    p.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const t of texts) { t.y -= 34 * dt; t.life -= dt; }
+  texts = texts.filter(t => t.life > 0);
+
+  /* --- win --- */
+  if (!game.over && game.wave >= WAVES && game.spawnQueue.length === 0 && zombies.length === 0) {
+    game.winDelay += dt;
+    if (game.winDelay > 1.2) {
+      game.over = true;
+      game.win = true;
+      tone(660, 0.18, 'triangle', 0.07, 220);
+      setTimeout(() => tone(880, 0.3, 'triangle', 0.07, 220), 180);
+    }
+  } else {
+    game.winDelay = 0;
+  }
+}
+
+/* ---------------- background ---------------- */
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#8fd0e8');
+  sky.addColorStop(0.45, '#9fd7a5');
+  sky.addColorStop(1, '#79b64f');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // lawn
+  for (let r = 0; r < ROWS; r++) {
+    ctx.fillStyle = r % 2 === 0 ? '#7cba3f' : '#6cae36';
+    ctx.fillRect(LAWN_X, LAWN_Y + r * CELL_H, COLS * CELL_W, CELL_H);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(LAWN_X, LAWN_Y + r * CELL_H, COLS * CELL_W, 8);
+    ctx.fillStyle = 'rgba(0,0,0,0.045)';
+    ctx.fillRect(LAWN_X, LAWN_Y + r * CELL_H + CELL_H - 8, COLS * CELL_W, 8);
+  }
+  // subtle cell separators
+  ctx.strokeStyle = 'rgba(30,70,20,0.10)';
+  ctx.lineWidth = 1;
+  for (let c = 1; c < COLS; c++) {
+    const x = LAWN_X + c * CELL_W;
+    ctx.beginPath(); ctx.moveTo(x, LAWN_Y); ctx.lineTo(x, LAWN_B); ctx.stroke();
+  }
+  // grass tufts
+  for (const t of tufts) {
+    ctx.strokeStyle = 'rgba(40,90,25,0.28)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(t.x, t.y);
+    ctx.quadraticCurveTo(t.x + Math.sin(t.a) * 3, t.y - t.l * 0.6, t.x + Math.sin(t.a) * 6, t.y - t.l);
+    ctx.stroke();
+  }
+  // lawn border
+  ctx.strokeStyle = 'rgba(45,85,30,0.55)';
+  ctx.lineWidth = 5;
+  ctx.strokeRect(LAWN_X - 3, LAWN_Y - 3, COLS * CELL_W + 6, ROWS * CELL_H + 6);
+
+  // right spawn path
+  const dirt = ctx.createLinearGradient(LAWN_R, 0, W, 0);
+  dirt.addColorStop(0, '#9c8153');
+  dirt.addColorStop(1, '#7d6340');
+  ctx.fillStyle = dirt;
+  ctx.fillRect(LAWN_R, 132, W - LAWN_R, H - 132);
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth = 1;
+  for (let y = 150; y < H; y += 44) {
+    ctx.beginPath(); ctx.moveTo(LAWN_R, y); ctx.lineTo(W, y + 10); ctx.stroke();
+  }
+  // tombstones
+  drawTombstone(1222, 300, 34, 44);
+  drawTombstone(1250, 470, 30, 40);
+  drawTombstone(1206, 570, 26, 34);
+  if (W > 1360) {
+    drawTombstone(W - 70, 330, 34, 46);
+    drawTombstone(W - 150, 550, 30, 40);
+    drawTombstone(W - 90, 600, 24, 32);
+    // 远处雾气
+    const fog = ctx.createLinearGradient(LAWN_R, 0, W, 0);
+    fog.addColorStop(0, 'rgba(70,90,60,0)');
+    fog.addColorStop(1, 'rgba(60,80,55,0.30)');
+    ctx.fillStyle = fog;
+    ctx.fillRect(LAWN_R, 132, W - LAWN_R, H - 132);
+  }
+}
+function drawTombstone(x, y, w, h) {
+  ctx.fillStyle = '#8f9599';
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2, y);
+  ctx.lineTo(x - w / 2, y - h + w / 2);
+  ctx.arc(x, y - h + w / 2, w / 2, Math.PI, 0);
+  ctx.lineTo(x + w / 2, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.strokeStyle = 'rgba(60,70,60,0.45)'; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x, y - h + 9); ctx.lineTo(x, y - h + 24);
+  ctx.moveTo(x - 7, y - h + 15); ctx.lineTo(x + 7, y - h + 15);
+  ctx.stroke();
+}
+
+function drawHouse() {
+  const houseW = 176;
+  ctx.fillStyle = '#d7b487';
+  ctx.fillRect(0, 132, houseW, LAWN_B - 132);
+
+  // bricks
+  ctx.strokeStyle = 'rgba(120,80,40,0.22)';
+  ctx.lineWidth = 2;
+  for (let y = 150; y < LAWN_B; y += 30) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(houseW, y); ctx.stroke();
+    const off = ((y / 30) % 2) ? 0 : 34;
+    for (let x = off; x < houseW; x += 68) {
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 30); ctx.stroke();
+    }
+  }
+  // eave
+  ctx.fillStyle = '#8b3b2a';
+  ctx.fillRect(0, 126, houseW + 8, 22);
+  ctx.fillStyle = '#a54a34';
+  ctx.fillRect(0, 126, houseW + 8, 8);
+  // window
+  ctx.fillStyle = '#6f4a24';
+  rr(38, 200, 104, 92, 8); ctx.fill();
+  const glass = ctx.createLinearGradient(46, 208, 130, 284);
+  glass.addColorStop(0, '#bfe6f5');
+  glass.addColorStop(1, '#7fb9d9');
+  ctx.fillStyle = glass;
+  rr(46, 208, 88, 76, 4); ctx.fill();
+  ctx.strokeStyle = '#6f4a24'; ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(90, 208); ctx.lineTo(90, 284);
+  ctx.moveTo(46, 246); ctx.lineTo(134, 246);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.ellipse(64, 226, 12, 6, -0.5, 0, 7); ctx.fill();
+
+  // door
+  ctx.fillStyle = '#6f4a24';
+  rr(46, 520, 90, 125, 8); ctx.fill();
+  ctx.fillStyle = '#8b5c2e';
+  rr(54, 528, 74, 117, 6); ctx.fill();
+  ctx.fillStyle = '#e8cf94';
+  ctx.beginPath(); ctx.arc(110, 586, 5, 0, 7); ctx.fill();
+
+  // name plate
+  ctx.fillStyle = '#f2e3bd';
+  rr(30, 640 - 32, 116, 24, 6); ctx.fill();
+  ctx.strokeStyle = '#7a5323'; ctx.lineWidth = 2; ctx.stroke();
+  text('李依然之家', 88, 640 - 20, 13, '#5a3a16');
+
+  // pavement strip beside lawn
+  ctx.fillStyle = '#b9a37c';
+  ctx.fillRect(houseW, 132, LAWN_X - houseW, LAWN_B - 132);
+  ctx.strokeStyle = 'rgba(0,0,0,0.10)'; ctx.lineWidth = 2;
+  for (let y = 150; y < LAWN_B; y += 40) {
+    ctx.beginPath(); ctx.moveTo(houseW, y); ctx.lineTo(LAWN_X, y); ctx.stroke();
+  }
+}
+
+/* ---------------- plants art ---------------- */
+function drawSunflower(t) {
+  ctx.save();
+  ctx.rotate(Math.sin(t * 1.5) * 0.035);
+  // stem
+  ctx.strokeStyle = '#4f8f2a'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(2, 10, 0, 30); ctx.stroke();
+  // leaves
+  ctx.fillStyle = '#69b33f';
+  ctx.beginPath(); ctx.ellipse(-19, 22, 16, 8, -0.45, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(19, 24, 16, 8, 0.45, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#4a8a2b'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(-19, 22, 16, 8, -0.45, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.ellipse(19, 24, 16, 8, 0.45, 0, 7); ctx.stroke();
+
+  // petals
+  for (let i = 0; i < 14; i++) {
+    const a = (i / 14) * Math.PI * 2 + Math.sin(t * 1.2) * 0.05;
+    ctx.save();
+    ctx.translate(Math.cos(a) * 23, -26 + Math.sin(a) * 23);
+    ctx.rotate(a);
+    ctx.fillStyle = i % 2 ? '#ffd93d' : '#ffc21a';
+    ctx.beginPath(); ctx.ellipse(4, 0, 13, 7.5, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(214,140,10,0.55)'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.ellipse(4, 0, 13, 7.5, 0, 0, 7); ctx.stroke();
+    ctx.restore();
+  }
+  // head
+  const g = ctx.createRadialGradient(-6, -32, 2, 0, -26, 23);
+  g.addColorStop(0, '#f9cf63');
+  g.addColorStop(1, '#d98f22');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0, -26, 20, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#a8681a'; ctx.lineWidth = 2;
+  ctx.stroke();
+  // face
+  ctx.fillStyle = '#4a2c0c';
+  ctx.beginPath(); ctx.arc(-7, -29, 2.8, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(7, -29, 2.8, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#4a2c0c'; ctx.lineWidth = 2.4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(0, -24, 7.5, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+  ctx.fillStyle = 'rgba(240,120,80,0.35)';
+  ctx.beginPath(); ctx.arc(-11, -22, 3.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(11, -22, 3.4, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawPeashooter(t, recoil = 0) {
+  ctx.save();
+  ctx.rotate(Math.sin(t * 1.7) * 0.02);
+  // stem
+  ctx.strokeStyle = '#4d8c28'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.quadraticCurveTo(-4, 8, -2, 26); ctx.stroke();
+  // leaves
+  ctx.fillStyle = '#69b33f';
+  ctx.beginPath(); ctx.ellipse(-20, 20, 15, 7.5, -0.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(16, 24, 15, 7.5, 0.4, 0, 7); ctx.fill();
+
+  const hx = -3 - recoil * 4, hy = -34;
+  // back leaf tuft
+  ctx.fillStyle = '#5aa62f';
+  ctx.beginPath(); ctx.ellipse(hx - 13, hy - 12, 9, 14, 0.5, 0, 7); ctx.fill();
+
+  // snout
+  ctx.fillStyle = '#5da833';
+  rr(hx + 8, hy - 8, 30, 16, 8); ctx.fill();
+  ctx.strokeStyle = '#3a7520'; ctx.lineWidth = 2;
+  rr(hx + 8, hy - 8, 30, 16, 8); ctx.stroke();
+  ctx.fillStyle = '#3e7d20';
+  ctx.beginPath(); ctx.arc(hx + 37, hy, 8.5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#1e4610';
+  ctx.beginPath(); ctx.arc(hx + 38, hy, 5, 0, 7); ctx.fill();
+
+  // head
+  const hg = ctx.createRadialGradient(hx - 7, hy - 9, 2, hx, hy, 22);
+  hg.addColorStop(0, '#9ada64');
+  hg.addColorStop(1, '#5aa62f');
+  ctx.fillStyle = hg;
+  ctx.beginPath(); ctx.arc(hx, hy, 20, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#3a7520'; ctx.lineWidth = 2.4; ctx.stroke();
+
+  // angry brows
+  ctx.strokeStyle = '#234d10'; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(hx - 15, hy - 12); ctx.lineTo(hx - 5, hy - 6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(hx + 11, hy - 6); ctx.lineTo(hx + 21, hy - 12); ctx.stroke();
+  // eyes
+  ctx.fillStyle = '#f6fff0';
+  ctx.beginPath(); ctx.arc(hx - 8, hy - 2, 5.2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(hx + 6, hy - 2, 5.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#1c3a0c';
+  ctx.beginPath(); ctx.arc(hx - 6, hy - 2, 2.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(hx + 8, hy - 2, 2.6, 0, 7); ctx.fill();
+  // frown
+  ctx.strokeStyle = '#234d10'; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.arc(hx, hy + 8, 5.5, 1.15 * Math.PI, 1.85 * Math.PI); ctx.stroke();
+  ctx.restore();
+}
+
+function drawWallnut(hpRatio = 1, wobble = 0) {
+  ctx.save();
+  ctx.rotate(wobble);
+  const g = ctx.createLinearGradient(-32, -80, 30, 0);
+  g.addColorStop(0, '#e0b072');
+  g.addColorStop(0.55, '#c38c48');
+  g.addColorStop(1, '#9a6329');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.ellipse(0, -42, 33, 42, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#7a4f1c'; ctx.lineWidth = 4; ctx.stroke();
+  // top nub
+  ctx.fillStyle = '#b97e3c';
+  ctx.beginPath(); ctx.ellipse(0, -83, 9, 6, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#7a4f1c'; ctx.lineWidth = 2; ctx.stroke();
+  // texture
+  ctx.strokeStyle = 'rgba(110,65,20,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-20, -70); ctx.quadraticCurveTo(-8, -55, -20, -40); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(18, -62); ctx.quadraticCurveTo(8, -46, 20, -30); ctx.stroke();
+  // highlight
+  ctx.fillStyle = 'rgba(255,240,200,0.28)';
+  ctx.beginPath(); ctx.ellipse(-16, -60, 10, 16, 0.3, 0, 7); ctx.fill();
+  // face
+  ctx.fillStyle = '#3d2508';
+  ctx.beginPath(); ctx.arc(-11, -50, 4.2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(11, -50, 4.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-12, -51.5, 1.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -51.5, 1.4, 0, 7); ctx.fill();
+  // determined brows
+  ctx.strokeStyle = '#3d2508'; ctx.lineWidth = 3.4; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-18, -61); ctx.lineTo(-5, -57); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(18, -61); ctx.lineTo(5, -57); ctx.stroke();
+  // mouth
+  ctx.strokeStyle = '#3d2508'; ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.moveTo(-7, -36); ctx.quadraticCurveTo(0, -32, 7, -36); ctx.stroke();
+  // cracks when damaged
+  if (hpRatio < 0.7) {
+    ctx.strokeStyle = 'rgba(80,45,10,0.75)'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(12, -78); ctx.lineTo(6, -66); ctx.lineTo(14, -58); ctx.lineTo(8, -46); ctx.stroke();
+  }
+  if (hpRatio < 0.4) {
+    ctx.beginPath(); ctx.moveTo(-24, -66); ctx.lineTo(-16, -55); ctx.lineTo(-23, -44); ctx.lineTo(-15, -33); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(16, -30); ctx.lineTo(24, -22); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawPlantByType(type, t, recoil, hpRatio, wobble) {
+  if (type === 'sunflower') drawSunflower(t);
+  else if (type === 'peashooter') drawPeashooter(t, recoil);
+  else drawWallnut(hpRatio, wobble);
+}
+
+function drawPlants() {
+  for (const p of plants) {
+    ctx.save();
+    ctx.translate(p.cx, p.baseY);
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.beginPath(); ctx.ellipse(0, 2, 32, 9, 0, 0, 7); ctx.fill();
+    const wob = p.type === 'wallnut' ? Math.sin(animT * 2 + p.seed) * 0.02 : 0;
+    drawPlantByType(p.type, animT + p.seed, p.recoil || 0, p.hp / p.maxHp, wob);
+    ctx.restore();
+    // hp bar
+    if (p.hp < p.maxHp - 0.5) {
+      const ratio = clamp(p.hp / p.maxHp, 0, 1);
+      const bw = 44, bx = p.cx - bw / 2, by = p.baseY - 92;
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      rr(bx - 1, by - 1, bw + 2, 8, 3); ctx.fill();
+      ctx.fillStyle = ratio > 0.5 ? '#7ee04c' : ratio > 0.25 ? '#ffcf3f' : '#ff5b4a';
+      rr(bx, by, bw * ratio, 6, 3); ctx.fill();
+    }
+  }
+}
+
+function drawPeas() {
+  for (const p of peas) {
+    ctx.save();
+    ctx.fillStyle = '#8cd642';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#5aa02a'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(p.x - 2.5, p.y - 2.5, 2.6, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+}
+
+/* ---------------- zombies art ---------------- */
+function drawZombie(z) {
+  const baseY = rowBaseY(z.row) + 8;
+  const walking = !z.eating;
+  const step = walking ? Math.sin(z.anim * 7 + z.seed) : 0;
+  const bob = walking ? Math.abs(Math.sin(z.anim * 7 + z.seed)) * 2 : Math.sin(z.anim * 16) * 1.2;
+
+  ctx.save();
+  ctx.translate(z.x, baseY);
+  // 厚血僵尸：脚下红色光环
+  if (z.thick) {
+    const pulse = 0.55 + 0.45 * Math.sin(animT * 4 + z.seed);
+    const halo = ctx.createRadialGradient(0, 0, 4, 0, 0, 46);
+    halo.addColorStop(0, 'rgba(255,70,60,' + (0.5 * pulse).toFixed(3) + ')');
+    halo.addColorStop(0.55, 'rgba(240,30,30,' + (0.26 * pulse).toFixed(3) + ')');
+    halo.addColorStop(1, 'rgba(240,0,0,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.ellipse(0, 0, 46, 16, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,95,70,' + (0.85 * pulse).toFixed(3) + ')';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.ellipse(0, 0, 30, 10, 0, 0, 7); ctx.stroke();
+  }
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.beginPath(); ctx.ellipse(0, 0, 26, 7, 0, 0, 7); ctx.fill();
+  ctx.translate(0, -bob);
+
+  // legs
+  ctx.strokeStyle = '#44505c'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-6, -24); ctx.lineTo(-10 + step * 7, 0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(8, -24); ctx.lineTo(12 - step * 7, 0); ctx.stroke();
+  // shoes
+  ctx.fillStyle = '#2d3338';
+  ctx.beginPath(); ctx.ellipse(-10 + step * 7, 0, 7, 4, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(12 - step * 7, 0, 7, 4, 0, 0, 7); ctx.fill();
+
+  // torso
+  const tg = ctx.createLinearGradient(0, -56, 0, -14);
+  tg.addColorStop(0, '#6d7f8e');
+  tg.addColorStop(1, '#4b5a67');
+  ctx.fillStyle = tg;
+  rr(-17, -56, 34, 40, 8); ctx.fill();
+  ctx.strokeStyle = '#38434d'; ctx.lineWidth = 2;
+  rr(-17, -56, 34, 40, 8); ctx.stroke();
+  // tattered shirt hem
+  ctx.fillStyle = '#3c4a55';
+  ctx.beginPath();
+  ctx.moveTo(-17, -22);
+  ctx.lineTo(-11, -13);
+  ctx.lineTo(-5, -21);
+  ctx.lineTo(1, -12);
+  ctx.lineTo(7, -20);
+  ctx.lineTo(13, -13);
+  ctx.lineTo(17, -21);
+  ctx.lineTo(17, -16);
+  ctx.lineTo(-17, -16);
+  ctx.closePath(); ctx.fill();
+  // collar
+  ctx.fillStyle = '#8595a3';
+  ctx.beginPath(); ctx.moveTo(-8, -56); ctx.lineTo(0, -47); ctx.lineTo(8, -56); ctx.closePath(); ctx.fill();
+
+  // arms reaching left
+  ctx.strokeStyle = '#a9b78f'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-11, -50); ctx.lineTo(-35, -46 + step * 1.6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-3, -45); ctx.lineTo(-31, -34 - step * 1.6); ctx.stroke();
+  // sleeves
+  ctx.strokeStyle = '#5f7080'; ctx.lineWidth = 11;
+  ctx.beginPath(); ctx.moveTo(-11, -50); ctx.lineTo(-19, -48); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-3, -45); ctx.lineTo(-10, -43); ctx.stroke();
+  // hands
+  ctx.fillStyle = '#9fae83';
+  ctx.beginPath(); ctx.arc(-36, -46 + step * 1.6, 6.5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(-32, -34 - step * 1.6, 6.5, 0, 7); ctx.fill();
+
+  // head
+  ctx.save();
+  if (z.eating) {
+    ctx.translate(-2, Math.sin(z.anim * 16) * 1.8);
+    ctx.rotate(-0.07);
+  }
+  ctx.fillStyle = '#94a37a';
+  rr(-6, -63, 12, 10, 4); ctx.fill();
+  const hg = ctx.createRadialGradient(-5, -73, 2, 0, -66, 21);
+  hg.addColorStop(0, '#c6d2ab');
+  hg.addColorStop(1, '#93a378');
+  ctx.fillStyle = hg;
+  ctx.beginPath(); ctx.ellipse(0, -66, 17, 19, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#75855c'; ctx.lineWidth = 2; ctx.stroke();
+  // hair
+  ctx.fillStyle = '#4b4b3f';
+  ctx.beginPath(); ctx.ellipse(-3, -81, 12, 5.5, 0.1, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(9, -80, 6, 4, -0.3, 0, 7); ctx.fill();
+  // ears
+  ctx.fillStyle = '#9aa983';
+  ctx.beginPath(); ctx.ellipse(-16, -66, 3.5, 5, 0, 0, 7); ctx.fill();
+
+  // eyes
+  ctx.fillStyle = '#f4f4ea';
+  ctx.beginPath(); ctx.arc(-7, -68, 5.2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(5.5, -68, 5.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#2b2b24';
+  ctx.beginPath(); ctx.arc(-9.5, -68, 2.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(3, -68, 2.4, 0, 7); ctx.fill();
+  // sad brows (inner ends raised)
+  ctx.strokeStyle = '#4b4b3f'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-13, -73); ctx.lineTo(-2.5, -77); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(2.5, -77); ctx.lineTo(13, -73); ctx.stroke();
+  // frown
+  ctx.strokeStyle = '#4b4b3f'; ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.arc(0, -55, 6, 1.05 * Math.PI, 1.95 * Math.PI); ctx.stroke();
+  // tear
+  const tearT = (z.anim * 0.55 + z.seed) % 1;
+  ctx.fillStyle = 'rgba(120,205,255,' + (0.85 * (1 - tearT)) + ')';
+  ctx.beginPath(); ctx.ellipse(-9.5, -62 + tearT * 15, 2.4, 3.4, 0, 0, 7); ctx.fill();
+  // damage flash
+  if (z.flash > 0) {
+    ctx.globalAlpha = Math.min(0.7, z.flash * 4);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.ellipse(0, -66, 17, 19, 0, 0, 7); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  // hp bar
+  if (z.hp < z.maxHp - 0.5) {
+    const ratio = clamp(z.hp / z.maxHp, 0, 1);
+    const bw = 40, bx = -bw / 2, by = -94;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    rr(bx - 1, by - 1, bw + 2, 8, 3); ctx.fill();
+    ctx.fillStyle = ratio > 0.5 ? '#7ee04c' : ratio > 0.25 ? '#ffcf3f' : '#ff5b4a';
+    rr(bx, by, bw * ratio, 6, 3); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawZombies() {
+  const sorted = [...zombies].sort((a, b) => a.row - b.row);
+  for (const z of sorted) drawZombie(z);
+}
+
+/* ---------------- mower ---------------- */
+function drawMower(m) {
+  if (m.state === 'gone') return;
+  const y = rowBaseY(m.row) + 10;
+  ctx.save();
+  ctx.translate(m.x, y);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.beginPath(); ctx.ellipse(0, 0, 30, 8, 0, 0, 7); ctx.fill();
+  // handle
+  ctx.strokeStyle = '#8a1f18'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-18, -34); ctx.lineTo(-26, -58); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-34, -58); ctx.lineTo(-16, -58); ctx.stroke();
+  // blade housing
+  ctx.fillStyle = '#cfd8e0';
+  ctx.beginPath(); ctx.arc(30, -20, 12, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#8f9aa4'; ctx.lineWidth = 2; ctx.stroke();
+  // blade
+  ctx.save();
+  ctx.translate(30, -20);
+  ctx.rotate(m.anim * 22);
+  ctx.fillStyle = '#eef3f7';
+  for (let i = 0; i < 4; i++) {
+    ctx.rotate(Math.PI / 2);
+    ctx.beginPath(); ctx.ellipse(0, -8, 3.5, 8, 0, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+  // body
+  const bg = ctx.createLinearGradient(0, -38, 0, -8);
+  bg.addColorStop(0, '#ee5644');
+  bg.addColorStop(1, '#b7271c');
+  ctx.fillStyle = bg;
+  rr(-27, -38, 52, 30, 7); ctx.fill();
+  ctx.strokeStyle = '#7e1912'; ctx.lineWidth = 2.5;
+  rr(-27, -38, 52, 30, 7); ctx.stroke();
+  // grill
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath(); ctx.moveTo(-20 + i * 8, -32); ctx.lineTo(-20 + i * 8, -18); ctx.stroke();
+  }
+  // wheels
+  ctx.fillStyle = '#242424';
+  ctx.beginPath(); ctx.arc(-16, -8, 9, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(14, -8, 9, 0, 7); ctx.fill();
+  ctx.fillStyle = '#8e8e8e';
+  ctx.beginPath(); ctx.arc(-16, -8, 3.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(14, -8, 3.6, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function drawMowers() { for (const m of mowers) drawMower(m); }
+
+/* ---------------- sun ---------------- */
+function makeSun(x, y, targetY, value) {
+  return { x, y, targetY, value, landed: false, life: 15, spin: rand(0, 6.28), sc: 0.2 };
+}
+function drawSunIcon(x, y, r, t = 0) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(t);
+  for (let i = 0; i < 12; i++) {
+    ctx.rotate(Math.PI / 6);
+    ctx.fillStyle = 'rgba(255,214,64,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(0, -r * 1.45);
+    ctx.lineTo(r * 0.17, -r * 0.92);
+    ctx.lineTo(-r * 0.17, -r * 0.92);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, 1, x, y, r);
+  g.addColorStop(0, '#fff9b8');
+  g.addColorStop(0.55, '#ffd93b');
+  g.addColorStop(1, '#f0a400');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(196,126,0,0.75)'; ctx.lineWidth = Math.max(1, r * 0.07);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath(); ctx.ellipse(x - r * 0.3, y - r * 0.32, r * 0.26, r * 0.16, -0.6, 0, 7); ctx.fill();
+}
+function drawSuns() {
+  for (const s of suns) {
+    ctx.save();
+    if (!s.landed) ctx.globalAlpha = 0.95;
+    if (s.life < 2) ctx.globalAlpha = clamp(s.life / 2, 0.15, 1);
+    drawSunIcon(s.x, s.y + Math.sin(animT * 2 + s.spin) * 2, 26 * s.sc, s.spin);
+    ctx.restore();
+  }
+}
+
+/* ---------------- particles / texts ---------------- */
+function drawParticles() {
+  for (const p of particles) {
+    ctx.globalAlpha = clamp(p.life / p.max, 0, 1);
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTexts() {
+  for (const t of texts) {
+    ctx.globalAlpha = clamp(t.life / t.max, 0, 1);
+    text(t.str, t.x, t.y, 20, t.color, 'center', true, 'rgba(0,0,0,0.55)');
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------- hover / preview ---------------- */
+function drawHover() {
+  if (!game.started || game.paused || game.over || !selected) return;
+  const cell = cellAt(mouse.x, mouse.y);
+  if (!cell) return;
+  const x = LAWN_X + cell.col * CELL_W, y = LAWN_Y + cell.row * CELL_H;
+  if (selected === 'shovel') {
+    const p = plantAt(cell.row, cell.col);
+    ctx.strokeStyle = 'rgba(255,90,70,0.85)';
+    ctx.lineWidth = 4;
+    rr(x + 5, y + 5, CELL_W - 10, CELL_H - 10, 10); ctx.stroke();
+    if (p) {
+      ctx.fillStyle = 'rgba(255,70,50,0.18)';
+      rr(x + 5, y + 5, CELL_W - 10, CELL_H - 10, 10); ctx.fill();
+    }
+  } else {
+    const occupied = !!plantAt(cell.row, cell.col);
+    ctx.strokeStyle = occupied ? 'rgba(255,110,90,0.8)' : 'rgba(255,255,220,0.9)';
+    ctx.lineWidth = 4;
+    rr(x + 5, y + 5, CELL_W - 10, CELL_H - 10, 10); ctx.stroke();
+    ctx.fillStyle = occupied ? 'rgba(255,90,70,0.15)' : 'rgba(255,255,255,0.16)';
+    rr(x + 5, y + 5, CELL_W - 10, CELL_H - 10, 10); ctx.fill();
+    if (!occupied) {
+      ctx.save();
+      ctx.globalAlpha = 0.55;
+      ctx.translate(cellCX(cell.col), rowBaseY(cell.row));
+      drawPlantByType(selected, animT, 0, 1, 0);
+      ctx.restore();
+    }
+  }
+}
+function drawPlantTooltip() {
+  if (!game.started || game.over || game.paused || selected) return;
+  const cell = cellAt(mouse.x, mouse.y);
+  if (!cell) return;
+  const p = plantAt(cell.row, cell.col);
+  if (!p) return;
+  const label = PLANTS[p.type].name;
+  ctx.font = 'bold 15px ' + FONT;
+  const w = ctx.measureText(label).width + 26;
+  const x = clamp(p.cx - w / 2, 10, W - w - 10);
+  const y = p.baseY - 116;
+  ctx.fillStyle = 'rgba(28,20,8,0.82)';
+  rr(x, y, w, 30, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,224,138,0.8)'; ctx.lineWidth = 2;
+  rr(x, y, w, 30, 8); ctx.stroke();
+  text(label, x + w / 2, y + 16, 15, '#ffe9a8');
+}
+
+/* ---------------- HUD ---------------- */
+function drawHUD() {
+  // top wooden bar
+  const g = ctx.createLinearGradient(0, 0, 0, 132);
+  g.addColorStop(0, '#97663a');
+  g.addColorStop(0.5, '#7b512a');
+  g.addColorStop(1, '#5a3a1b');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, 132);
+  ctx.fillStyle = 'rgba(255,225,170,0.18)';
+  ctx.fillRect(0, 0, W, 5);
+  ctx.fillStyle = '#3a2410';
+  ctx.fillRect(0, 126, W, 7);
+  // wood grain
+  ctx.strokeStyle = 'rgba(0,0,0,0.09)'; ctx.lineWidth = 2;
+  for (let i = 0; i < 8; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * 170, 4);
+    ctx.bezierCurveTo(i * 170 + 40, 40, i * 170 + 10, 90, i * 170 + 60, 126);
+    ctx.stroke();
+  }
+
+  // sun counter
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  rr(18, 16, 148, 106, 14); ctx.fill();
+  const sg = ctx.createLinearGradient(0, 14, 0, 120);
+  sg.addColorStop(0, '#fbf0d2');
+  sg.addColorStop(1, '#e8d6ab');
+  ctx.fillStyle = sg;
+  rr(16, 14, 148, 106, 14); ctx.fill();
+  ctx.strokeStyle = '#6b4a22'; ctx.lineWidth = 3;
+  rr(16, 14, 148, 106, 14); ctx.stroke();
+  drawSunIcon(60, 66, 24, animT * 0.35);
+  text(String(game.sun), 122, 68, 36, '#4a3418');
+  ctx.restore();
+
+  // cards
+  for (const c of CARDS) drawCard(c);
+
+  // shovel
+  drawShovel();
+
+  // mute & pause
+  drawIconButtons();
+}
+function drawCard(c) {
+  const x = c.x, y = CARD_Y, w = CARD_W, h = CARD_H;
+  const affordable = game.sun >= c.cost;
+  const ready = c.cdLeft <= 0;
+  const isSel = selected === c.id;
+
+  ctx.save();
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  rr(x + 2, y + 4, w, h, 12); ctx.fill();
+  // body
+  const cg = ctx.createLinearGradient(0, y, 0, y + h);
+  if (ready && affordable) {
+    cg.addColorStop(0, '#fbf1d4'); cg.addColorStop(1, '#e3d0a4');
+  } else {
+    cg.addColorStop(0, '#d8cfb4'); cg.addColorStop(1, '#bdb190');
+  }
+  ctx.fillStyle = cg;
+  rr(x, y, w, h, 12); ctx.fill();
+  ctx.strokeStyle = isSel ? '#ffd54a' : '#6b4a22';
+  ctx.lineWidth = isSel ? 4 : 2.5;
+  rr(x, y, w, h, 12); ctx.stroke();
+  if (isSel) {
+    ctx.shadowColor = 'rgba(255,213,74,0.9)';
+    ctx.shadowBlur = 14;
+    ctx.strokeStyle = 'rgba(255,213,74,0.9)';
+    ctx.lineWidth = 3;
+    rr(x, y, w, h, 12); ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // plant icon
+  ctx.save();
+  ctx.beginPath(); rr(x + 3, y + 3, w - 6, h - 6, 10); ctx.clip();
+  ctx.translate(x + w / 2, y + 72);
+  ctx.scale(0.48, 0.48);
+  drawPlantByType(c.id, animT + 1, 0, 1, 0);
+  ctx.restore();
+
+  // name
+  text(c.name, x + w / 2, y + 94, 11, ready && affordable ? '#4a3418' : '#8b7d63');
+
+  // cost
+  drawSunIcon(x + 18, y + 110, 9, animT * 0.5);
+  text(String(c.cost), x + 34, y + 110, 13, affordable ? '#3f2a0e' : '#c0392b', 'left');
+
+  // cooldown overlay
+  if (c.cdLeft > 0) {
+    const frac = clamp(c.cdLeft / c.cd, 0, 1);
+    ctx.fillStyle = 'rgba(15,15,18,0.55)';
+    rr(x + 2, y + 2, w - 4, (h - 4) * frac, 10); ctx.fill();
+    text(Math.ceil(c.cdLeft) + 's', x + w / 2, y + h / 2, 20, 'rgba(255,255,255,0.9)');
+  } else if (!affordable) {
+    ctx.fillStyle = 'rgba(25,20,10,0.34)';
+    rr(x + 2, y + 2, w - 4, h - 4, 10); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawShovel() {
+  const r = SHOVEL_RECT;
+  const isSel = selected === 'shovel';
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  rr(r.x + 2, r.y + 4, r.w, r.h, 12); ctx.fill();
+  const g = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+  g.addColorStop(0, '#f0e2c0'); g.addColorStop(1, '#cdbb95');
+  ctx.fillStyle = g;
+  rr(r.x, r.y, r.w, r.h, 12); ctx.fill();
+  ctx.strokeStyle = isSel ? '#ffd54a' : '#6b4a22';
+  ctx.lineWidth = isSel ? 4 : 2.5;
+  rr(r.x, r.y, r.w, r.h, 12); ctx.stroke();
+
+  ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+  ctx.rotate(0.5);
+  // handle
+  ctx.strokeStyle = '#8a5a2b'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-4, 24); ctx.lineTo(10, -16); ctx.stroke();
+  ctx.fillStyle = '#8a5a2b';
+  rr(-12, 18, 18, 8, 4); ctx.fill();
+  // blade
+  ctx.fillStyle = '#cfd8e0';
+  ctx.beginPath();
+  ctx.moveTo(2, -18); ctx.lineTo(26, -18); ctx.lineTo(22, -2); ctx.lineTo(8, -2);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#8f9aa4'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.restore();
+}
+function drawIconButtons() {
+  // mute
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  rr(MUTE_RECT.x, MUTE_RECT.y + 2, MUTE_RECT.w, MUTE_RECT.h, 10); ctx.fill();
+  ctx.fillStyle = '#f0e2c0';
+  rr(MUTE_RECT.x, MUTE_RECT.y, MUTE_RECT.w, MUTE_RECT.h, 10); ctx.fill();
+  ctx.strokeStyle = '#6b4a22'; ctx.lineWidth = 2; rr(MUTE_RECT.x, MUTE_RECT.y, MUTE_RECT.w, MUTE_RECT.h, 10); ctx.stroke();
+  ctx.fillStyle = '#5a3a16';
+  const mx = MUTE_RECT.x + 14, my = MUTE_RECT.y + 22;
+  ctx.beginPath();
+  ctx.moveTo(mx, my - 5); ctx.lineTo(mx + 6, my - 5); ctx.lineTo(mx + 13, my - 12);
+  ctx.lineTo(mx + 13, my + 12); ctx.lineTo(mx + 6, my + 5); ctx.lineTo(mx, my + 5);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = muted ? '#c0392b' : '#5a3a16'; ctx.lineWidth = 2.6; ctx.lineCap = 'round';
+  if (muted) {
+    ctx.beginPath(); ctx.moveTo(mx + 19, my - 7); ctx.lineTo(mx + 29, my + 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mx + 29, my - 7); ctx.lineTo(mx + 19, my + 7); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(mx + 14, my, 8, -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(mx + 14, my, 13, -0.8, 0.8); ctx.stroke();
+  }
+  ctx.restore();
+
+  // pause
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  rr(PAUSE_RECT.x, PAUSE_RECT.y + 2, PAUSE_RECT.w, PAUSE_RECT.h, 10); ctx.fill();
+  ctx.fillStyle = '#f0e2c0';
+  rr(PAUSE_RECT.x, PAUSE_RECT.y, PAUSE_RECT.w, PAUSE_RECT.h, 10); ctx.fill();
+  ctx.strokeStyle = '#6b4a22'; ctx.lineWidth = 2; rr(PAUSE_RECT.x, PAUSE_RECT.y, PAUSE_RECT.w, PAUSE_RECT.h, 10); ctx.stroke();
+  ctx.fillStyle = '#5a3a16';
+  const px = PAUSE_RECT.x + 16, py = PAUSE_RECT.y + 13;
+  if (game.paused) {
+    ctx.beginPath();
+    ctx.moveTo(px + 3, py); ctx.lineTo(px + 17, py + 9); ctx.lineTo(px + 3, py + 18);
+    ctx.closePath(); ctx.fill();
+  } else {
+    rr(px, py, 6, 18, 2); ctx.fill();
+    rr(px + 12, py, 6, 18, 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBottomBar() {
+  ctx.fillStyle = '#1b2a15';
+  ctx.fillRect(0, LAWN_B, W, H - LAWN_B);
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(0, LAWN_B, W, 3);
+
+  text('第 ' + game.wave + ' / ' + WAVES + ' 波', 34, LAWN_B + 38, 22, '#d8f0a8', 'left');
+  text('击杀 ' + game.zombiesKilled, 34, LAWN_B + 64, 14, '#8fae72', 'left');
+
+  // progress bar
+  const bx = W / 2 - 260, by = LAWN_B + 26, bw = 520, bh = 20;
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  rr(bx - 2, by - 2, bw + 4, bh + 4, 10); ctx.fill();
+  ctx.fillStyle = '#2f4224';
+  rr(bx, by, bw, bh, 9); ctx.fill();
+  const frac = clamp(game.wave / WAVES, 0, 1);
+  const pg = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+  pg.addColorStop(0, '#79cf3f');
+  pg.addColorStop(0.6, '#ffd24a');
+  pg.addColorStop(1, '#ff5f45');
+  ctx.fillStyle = pg;
+  if (frac > 0) { rr(bx, by, Math.max(12, bw * frac), bh, 9); ctx.fill(); }
+  // ticks
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
+  for (let i = 1; i < WAVES; i++) {
+    const x = bx + bw * (i / WAVES);
+    ctx.beginPath(); ctx.moveTo(x, by + 3); ctx.lineTo(x, by + bh - 3); ctx.stroke();
+  }
+  // marker
+  const mx = bx + bw * frac;
+  ctx.save();
+  ctx.translate(mx, by - 10);
+  ctx.fillStyle = '#e8f7cf';
+  ctx.beginPath(); ctx.arc(0, 0, 9, 0, 7); ctx.fill();
+  ctx.fillStyle = '#8fa87a';
+  ctx.beginPath(); ctx.arc(-3, -1, 2, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(3, -1, 2, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#4d5c40'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(0, 3, 3, 1.1 * Math.PI, 1.9 * Math.PI); ctx.stroke();
+  ctx.restore();
+
+  // countdown
+  let cdTxt;
+  if (game.wave >= WAVES) cdTxt = '最后一波！';
+  else cdTxt = '下一波 ' + Math.max(0, Math.ceil(game.waveTimer - game.time)) + 's';
+  text(cdTxt, W - 34, LAWN_B + 38, 18, '#d8f0a8', 'right');
+  text('P 暂停 · M 静音', W - 34, LAWN_B + 62, 13, '#7d9a63', 'right');
+}
+
+/* ---------------- overlays ---------------- */
+function drawBigWave() {
+  if (game.bigWaveMsg <= 0) return;
+  const a = clamp(game.bigWaveMsg / 3.4, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, a * 2.2);
+  ctx.fillStyle = 'rgba(60,0,0,0.55)';
+  ctx.fillRect(0, 250, W, 96);
+  ctx.strokeStyle = 'rgba(255,80,60,0.8)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(0, 250); ctx.lineTo(W, 250);
+  ctx.moveTo(0, 346); ctx.lineTo(W, 346); ctx.stroke();
+  const pulse = 1 + Math.sin(animT * 10) * 0.03;
+  ctx.save();
+  ctx.translate(W / 2, 298);
+  ctx.scale(pulse, pulse);
+  text('一大波伤心李依然正在接近！', 0, 0, 40, '#ff6a52', 'center', true, '#2a0000');
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawPanel(x, y, w, h, border = '#7a5323') {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  rr(x + 6, y + 8, w, h, 22); ctx.fill();
+  const g = ctx.createLinearGradient(0, y, 0, y + h);
+  g.addColorStop(0, '#fff4d8');
+  g.addColorStop(1, '#e9d3a4');
+  ctx.fillStyle = g;
+  rr(x, y, w, h, 22); ctx.fill();
+  ctx.strokeStyle = border; ctx.lineWidth = 5;
+  rr(x, y, w, h, 22); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.65)'; ctx.lineWidth = 2;
+  rr(x + 8, y + 8, w - 16, h - 16, 16); ctx.stroke();
+}
+function drawButton(r, label, color = '#7ac142') {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  rr(r.x, r.y + 5, r.w, r.h, 16); ctx.fill();
+  const g = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+  g.addColorStop(0, '#a6e06a');
+  g.addColorStop(0.55, color);
+  g.addColorStop(1, '#4e8f28');
+  ctx.fillStyle = g;
+  rr(r.x, r.y, r.w, r.h, 16); ctx.fill();
+  ctx.strokeStyle = '#2f5a17'; ctx.lineWidth = 3;
+  rr(r.x, r.y, r.w, r.h, 16); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  rr(r.x + 6, r.y + 6, r.w - 12, 12, 6); ctx.fill();
+  text(label, r.x + r.w / 2, r.y + r.h / 2 + 2, 27, '#fff', 'center', true, 'rgba(30,70,10,0.85)');
+  ctx.restore();
+}
+
+function drawStart() {
+  ctx.fillStyle = 'rgba(4,18,4,0.6)';
+  ctx.fillRect(0, 0, W, H);
+  drawPanel(START_PANEL.x, START_PANEL.y, START_PANEL.w, START_PANEL.h);
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(120,180,40,0.85)';
+  ctx.shadowBlur = 22;
+  text('植物大战李依然', W / 2, 160, 52, '#ffe066', 'center', true, '#3d2408');
+  ctx.restore();
+  text('一比一草坪塔防 · 横板复刻版', W / 2, 206, 16, '#7a6a4a');
+
+  // plant showcase
+  const items = [
+    { id: 'sunflower',  x: W / 2 - 220 },
+    { id: 'peashooter', x: W / 2 },
+    { id: 'wallnut',    x: W / 2 + 220 }
+  ];
+  for (const it of items) {
+    ctx.save();
+    ctx.translate(it.x, 316);
+    ctx.scale(0.85, 0.85);
+    drawPlantByType(it.id, animT, 0, 1, 0);
+    ctx.restore();
+    text(PLANTS[it.id].name, it.x, 352, 15, '#5a3a16');
+    ctx.save();
+    drawSunIcon(it.x - 22, 378, 8, animT * 0.4);
+    ctx.restore();
+    text(String(PLANTS[it.id].cost), it.x - 4, 378, 13, '#6b5426', 'left');
+  }
+
+  text('① 点击卡片选择植物，再点击草坪种下', W / 2, 416, 15, '#6b5426');
+  text('② 点击阳光收集能量，养出更多植物', W / 2, 442, 15, '#6b5426');
+  text('③ 守住 12 波伤心李依然，别让它们进屋', W / 2, 468, 15, '#6b5426');
+
+  drawButton(START_BTN, '开始游戏');
+  text('伤心李依然会吃掉你的脑子……', W / 2, 592, 13, '#96836a');
+}
+
+function drawOverlayBase(rgba) {
+  ctx.fillStyle = rgba;
+  ctx.fillRect(0, 0, W, H);
+}
+function drawGameOver() {
+  drawOverlayBase('rgba(30,0,0,0.62)');
+  const win = game.win;
+  drawPanel(W / 2 - 290, 150, 580, 400, win ? '#7a5323' : '#6b2a22');
+  text(win ? '草坪守住了！' : '伤心李依然吃掉了你的脑子！',
+    W / 2, 226, win ? 40 : 34, win ? '#6db52f' : '#c0392b', 'center', true, win ? '#2f5a17' : '#4a0f0a');
+  text(win ? '12 波全部击退，你是真正的园艺大师' : '它大摇大摆地走进了李依然之家……',
+    W / 2, 276, 16, '#7a6a4a');
+  text('坚持波数：' + game.wave + ' / ' + WAVES, W / 2, 330, 20, '#5a3a16');
+  text('击杀数量：' + game.zombiesKilled, W / 2, 364, 20, '#5a3a16');
+  drawButton(RESTART_BTN, win ? '再玩一局' : '再来一局');
+  text('点击按钮重新开始', W / 2, 526, 13, '#96836a');
+}
+function drawPause() {
+  drawOverlayBase('rgba(0,0,0,0.55)');
+  drawPanel(W / 2 - 200, 250, 400, 220);
+  text('已暂停', W / 2, 316, 40, '#5a3a16');
+  text('点击屏幕继续游戏', W / 2, 374, 16, '#7a6a4a');
+  text('P 键也可恢复', W / 2, 406, 13, '#96836a');
+}
+
+/* ---------------- render ---------------- */
+function render() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.save();
+  if (game.shake > 0) {
+    ctx.translate(rand(-1, 1) * game.shake * 5, rand(-1, 1) * game.shake * 5);
+  }
+  drawBackground();
+  drawHouse();
+  drawMowers();
+  drawHover();
+  drawPlants();
+  drawPeas();
+  drawZombies();
+  drawSuns();
+  drawParticles();
+  drawTexts();
+  drawHUD();
+  drawBottomBar();
+  drawBigWave();
+  drawPlantTooltip();
+  ctx.restore();
+
+  if (!game.started) drawStart();
+  else if (game.over) drawGameOver();
+  else if (game.paused) drawPause();
+}
+
+/* ---------------- input ---------------- */
+function toCanvas(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top) * (H / r.height)
+  };
+}
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointermove', e => {
+  const p = toCanvas(e);
+  mouse.x = p.x; mouse.y = p.y;
+});
+canvas.addEventListener('pointerleave', () => { mouse.x = -999; mouse.y = -999; });
+
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  initAudio();
+  const p = toCanvas(e);
+  mouse.x = p.x; mouse.y = p.y;
+  handleClick(p.x, p.y);
+});
+
+function handleClick(x, y) {
+  if (!game.started) {
+    if (inRect(x, y, START_BTN) || inRect(x, y, START_PANEL)) startGame();
+    return;
+  }
+  if (game.over) {
+    if (inRect(x, y, RESTART_BTN)) startGame();
+    return;
+  }
+  if (game.paused) { game.paused = false; return; }
+
+  if (inRect(x, y, PAUSE_RECT)) { game.paused = true; return; }
+  if (inRect(x, y, MUTE_RECT)) { setMuted(!muted); if (!muted) tone(600, 0.08, 'sine', 0.05, 100); return; }
+
+  // suns
+  for (let i = suns.length - 1; i >= 0; i--) {
+    const s = suns[i];
+    const r = 42 * Math.max(0.6, s.sc);
+    if ((x - s.x) ** 2 + (y - s.y) ** 2 <= r * r) { collectSun(i); return; }
+  }
+
+  // shovel
+  if (inRect(x, y, SHOVEL_RECT)) {
+    selected = selected === 'shovel' ? null : 'shovel';
+    tone(400, 0.07, 'square', 0.04, 80);
+    return;
+  }
+
+  // cards
+  for (const c of CARDS) {
+    if (inRect(x, y, { x: c.x, y: CARD_Y, w: CARD_W, h: CARD_H })) {
+      if (c.cdLeft > 0) {
+        addText('冷却中 ' + Math.ceil(c.cdLeft) + 's', c.x + CARD_W / 2, CARD_Y + CARD_H + 20, '#fff');
+        tone(200, 0.08, 'square', 0.03, -40);
+        return;
+      }
+      if (selected === c.id) { selected = null; }
+      else {
+        selected = c.id;
+        if (game.sun < c.cost) addText('阳光不足', c.x + CARD_W / 2, CARD_Y + CARD_H + 20, '#ff9a86');
+        tone(520, 0.07, 'triangle', 0.045, 120);
+      }
+      return;
+    }
+  }
+
+  // lawn
+  const cell = cellAt(x, y);
+  if (cell && selected) {
+    if (selected === 'shovel') removePlantAt(cell);
+    else placePlant(cell, selected);
+  }
+}
+
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 'p') {
+    if (game.started && !game.over) game.paused = !game.paused;
+  } else if (k === 'm') {
+    setMuted(!muted);
+  } else if (k === 'escape') {
+    selected = null;
+  } else if (k === 'r') {
+    if (game.over) startGame();
+  }
+});
+
+/* ---------------- main loop ---------------- */
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  animT += dt;
+  if (game.started && !game.paused && !game.over) update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+layout();
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
